@@ -7,7 +7,7 @@
   build  拉 5 源 → 跑生成脚本(auto_get_res_new.py) → 包内容无变化则跳过发布；
          有变化则打 zip、发 GitHub Release、提交 version.json + 状态到 main。
   hotupdate  生成后筛 stage_data_full 的 ACTIVITY 子集写成 stage_data.json，
-         推送到 MowerHotUpdate main（内容无变化跳过，幂等）。
+         连同 key_mapping.json 推送到 MowerHotUpdate main（无变化跳过，幂等）。
 
 运行环境（由 workflow 提供）:
   GITHUB_WORKSPACE       MowerResource 检出（仓库根 = 发布目标）
@@ -46,6 +46,7 @@ VERSION_JSON = "arknights_mower/data/version.json"  # 生成脚本产出的版�
 HOTUPDATE_REPO = "ArkMowers/MowerHotUpdate"  # 热更仓库（只推文件、不建 Release）
 HOTUPDATE_CLONE_URL = f"git@github.com:{HOTUPDATE_REPO}.git"
 STAGE_OVERLAY_FILE = "stage_data.json"  # 热更活动关卡文件（ACTIVITY 子集）
+KEY_MAPPING_FILE = "key_mapping.json"  # 物品名映射，供热更仓库打包时解析掉落中文名
 
 
 def workspace() -> Path:
@@ -455,10 +456,21 @@ def stage_overlay_bytes() -> bytes:
     return json.dumps(overlay, ensure_ascii=False, indent=2).encode("utf-8")
 
 
+def key_mapping_bytes() -> bytes:
+    """生成脚本产出的物品名映射，供热更仓库打包 Release notes 解析掉落中文名。"""
+    src = mower_dir() / "arknights_mower/data/key_mapping.json"
+    if not src.exists():
+        raise RuntimeError(f"缺少生成产物 {src}")
+    return src.read_bytes()
+
+
 def push_hotupdate_overlay() -> None:
-    """推活动关卡 overlay 到 MowerHotUpdate main；内容无变化则跳过（幂等）。"""
+    """推热更数据文件（活动关卡 overlay + 物品名映射）到 MowerHotUpdate main；无变化跳过。"""
     env = ssh_git_env("HOTUPDATE_SSH_KEY", "hotupdate_key")
-    content = stage_overlay_bytes()
+    files = {
+        STAGE_OVERLAY_FILE: stage_overlay_bytes(),
+        KEY_MAPPING_FILE: key_mapping_bytes(),
+    }
     repo = work_dir() / "mowerhotupdate"
     shutil.rmtree(repo, ignore_errors=True)
     git_run(
@@ -472,15 +484,20 @@ def push_hotupdate_overlay() -> None:
         ],
         env=env,
     )
-    target = repo / STAGE_OVERLAY_FILE
-    if target.exists() and target.read_bytes() == content:
-        print("热更活动关卡无变化，跳过推送")
-        return
-    target.write_bytes(content)
     git = ["git", "-C", str(repo)]
-    git_run([*git, "add", STAGE_OVERLAY_FILE])
+    changed = []
+    for name, content in files.items():
+        target = repo / name
+        if target.exists() and target.read_bytes() == content:
+            continue
+        target.write_bytes(content)
+        git_run([*git, "add", name])
+        changed.append(name)
+    if not changed:
+        print("热更数据无变化，跳过推送")
+        return
     if subprocess.run([*git, "diff", "--cached", "--quiet"]).returncode == 0:
-        print("热更活动关卡无变化，跳过提交")
+        print("热更数据无变化，跳过提交")
         return
     git_run(
         [
@@ -491,14 +508,15 @@ def push_hotupdate_overlay() -> None:
             "user.email=github-actions[bot]@users.noreply.github.com",
             "commit",
             "-m",
-            "build(hotupdate): 更新活动关卡数据\n\n"
-            "活动开启/结束时活动关数据随之变化，随资源包生成推送到热更仓库，\n"
-            "客户端运行时读热更层按 id 覆盖基线活动关，免等整包更新。\n\n"
+            "build(hotupdate): 更新热更数据\n\n"
+            "活动开启/结束或物品表变化时随之更新，随资源包生成推送到热更仓库：\n"
+            "活动关卡供客户端运行时按 id 覆盖基线活动关，物品名映射供 Release "
+            "notes 解析掉落中文名。\n\n"
             "Refs: #171",
         ]
     )
     git_run([*git, "push", "origin", "HEAD:main"], env=env)
-    print(f"已推送活动关卡 overlay 到 {HOTUPDATE_REPO}")
+    print(f"已推送热更数据（{'、'.join(changed)}）到 {HOTUPDATE_REPO}")
 
 
 def cmd_hotupdate() -> int:
