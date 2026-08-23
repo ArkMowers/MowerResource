@@ -6,6 +6,8 @@
          需要出包 → exit 0；否则 exit 1。
   build  拉 5 源 → 跑生成脚本(auto_get_res_new.py) → 包内容无变化则跳过发布；
          有变化则打 zip、发 GitHub Release、提交 version.json + 状态到 main。
+  hotupdate  生成后筛 stage_data_full 的 ACTIVITY 子集写成 stage_data.json，
+         推送到 MowerHotUpdate main（内容无变化跳过，幂等）。
 
 运行环境（由 workflow 提供）:
   GITHUB_WORKSPACE       MowerResource 检出（仓库根 = 发布目标）
@@ -14,7 +16,9 @@
   GITHUB_TOKEN           脚本走 GitHub API
   GH_TOKEN               gh CLI（建 Release / 传资产 / 清旧）
   MOWERFONTS_SSH_KEY     MowerFonts 只读 deploy key
+  HOTUPDATE_SSH_KEY      MowerHotUpdate 只写 deploy key（推活动关卡 overlay）
 """
+
 import base64
 import importlib.util
 import json
@@ -39,6 +43,9 @@ VOLATILE_SOURCES = [
 KEEP_RELEASES = 5  # 只保留最近 N 个 Release（客户端只要最新）
 RELEASE_ASSET = "resource.zip"  # 资产名稳定，客户端 releases/latest/download 拉
 VERSION_JSON = "arknights_mower/data/version.json"  # 生成脚本产出的版本元数据
+HOTUPDATE_REPO = "ArkMowers/MowerHotUpdate"  # 热更仓库（只推文件、不建 Release）
+HOTUPDATE_CLONE_URL = f"git@github.com:{HOTUPDATE_REPO}.git"
+STAGE_OVERLAY_FILE = "stage_data.json"  # 热更活动关卡文件（ACTIVITY 子集）
 
 
 def workspace() -> Path:
@@ -73,6 +80,14 @@ def run(cmd, check=True, capture=False):
     if check and result.returncode != 0:
         raise RuntimeError(f"命令失败 {cmd}: {result.stdout} {result.stderr}")
     return result.stdout if capture else result
+
+
+def git_run(cmd: list, env: dict | None = None) -> None:
+    """跑 git 命令；失败时把 stderr 带进异常，无人值守 CI 便于定位。"""
+    result = subprocess.run(cmd, capture_output=True, env=env)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).decode("utf-8", "replace").strip()
+        raise RuntimeError(f"git 失败: {detail or cmd}")
 
 
 def api_json(url: str):
@@ -126,8 +141,18 @@ def sparse_clone(url: str, branch: str, dest: Path, subdirs: list) -> None:
     """稀疏克隆单个目录子树，避免整仓下载。"""
     shutil.rmtree(dest, ignore_errors=True)
     subprocess.run(
-        ["git", "clone", "--depth", "1", "--filter=blob:none", "--sparse",
-         "--branch", branch, url, str(dest)],
+        [
+            "git",
+            "clone",
+            "--depth",
+            "1",
+            "--filter=blob:none",
+            "--sparse",
+            "--branch",
+            branch,
+            url,
+            str(dest),
+        ],
         check=True,
     )
     subprocess.run(
@@ -146,14 +171,15 @@ def copy_file(src: Path, dest: Path) -> None:
     shutil.copy2(src, dest)
 
 
-def fetch_fonts() -> Path:
-    """克隆私有 MowerFonts（走 MOWERFONTS_SSH_KEY），返回 fonts 目录。"""
-    key = os.environ.get("MOWERFONTS_SSH_KEY")
+def ssh_git_env(key_env: str, key_name: str) -> dict:
+    """把 GitHub secret 私钥写盘，返回带 GIT_SSH_COMMAND 的环境（供 git clone/push）。
+
+    secret 支持两种存法：原始 PEM（含字面 \\n 时还原），或 base64（无换行，最稳，
+    推荐）。写盘按字节，不 UTF-8 解码（OpenSSH 私钥 body 是二进制，解码会炸）。
+    """
+    key = os.environ.get(key_env)
     if not key:
-        raise RuntimeError("MOWERFONTS_SSH_KEY 未设置")
-    # GitHub secret 存多行私钥容易坏（换行丢失/变字面 \n），支持两种存法：
-    # 原始 PEM（含字面 \n 时还原），或 base64（无换行，最稳，推荐）。写盘按字节，
-    # 不 UTF-8 解码（OpenSSH 私钥 body 是二进制，解码会炸）。
+        raise RuntimeError(f"{key_env} 未设置")
     key = key.replace("\\n", "\n").strip()
     if "-----BEGIN" in key:
         key_bytes = key.encode("utf-8")
@@ -161,7 +187,7 @@ def fetch_fonts() -> Path:
         key_bytes = base64.b64decode(key)
     ssh_dir = Path.home() / ".ssh"
     ssh_dir.mkdir(exist_ok=True)
-    key_file = ssh_dir / "mowerfonts_key"
+    key_file = ssh_dir / key_name
     with open(key_file, "wb") as f:
         f.write(key_bytes + b"\n")
     os.chmod(key_file, 0o600)
@@ -169,12 +195,25 @@ def fetch_fonts() -> Path:
     env["GIT_SSH_COMMAND"] = (
         f"ssh -i {key_file} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no"
     )
+    return env
+
+
+def fetch_fonts() -> Path:
+    """克隆私有 MowerFonts（走 MOWERFONTS_SSH_KEY），返回 fonts 目录。"""
+    env = ssh_git_env("MOWERFONTS_SSH_KEY", "mowerfonts_key")
     fonts = work_dir() / "mowerfonts"
     shutil.rmtree(fonts, ignore_errors=True)
     subprocess.run(
-        ["git", "clone", "--depth", "1",
-         "git@github.com:ArkMowers/MowerFonts.git", str(fonts)],
-        env=env, check=True,
+        [
+            "git",
+            "clone",
+            "--depth",
+            "1",
+            "git@github.com:ArkMowers/MowerFonts.git",
+            str(fonts),
+        ],
+        env=env,
+        check=True,
     )
     return fonts / "fonts"
 
@@ -187,16 +226,22 @@ def fetch_sources() -> Path:
 
     # 1. excel：Kengxxiao/ArknightsGameData 的 zh_CN/gamedata/excel
     excel = work / "excel"
-    sparse_clone("https://github.com/Kengxxiao/ArknightsGameData.git",
-                 default_branch("Kengxxiao/ArknightsGameData"), excel,
-                 ["zh_CN/gamedata/excel"])
+    sparse_clone(
+        "https://github.com/Kengxxiao/ArknightsGameData.git",
+        default_branch("Kengxxiao/ArknightsGameData"),
+        excel,
+        ["zh_CN/gamedata/excel"],
+    )
     copy_tree(excel / "zh_CN/gamedata/excel", res_root / "gamedata/excel")
 
     # 2+3. item + avatar：yuanyan3060/ArknightsGameResource
     res = work / "res"
-    sparse_clone("https://github.com/yuanyan3060/ArknightsGameResource.git",
-                 default_branch("yuanyan3060/ArknightsGameResource"), res,
-                 ["item", "avatar"])
+    sparse_clone(
+        "https://github.com/yuanyan3060/ArknightsGameResource.git",
+        default_branch("yuanyan3060/ArknightsGameResource"),
+        res,
+        ["item", "avatar"],
+    )
     copy_tree(res / "item", res_root / "item")
     copy_tree(res / "avatar", res_root / "avatar")
     # avatar 上游只保留 char_*（剔 trap_/token_/npc_ 等非玩家干员）
@@ -226,8 +271,9 @@ def fetch_sources() -> Path:
 def run_generation(fonts_dir: Path) -> None:
     env = dict(os.environ)
     env["MOWERFONTS_DIR"] = str(fonts_dir)
-    subprocess.run([sys.executable, "auto_get_res_new.py"],
-                   cwd=mower_dir(), env=env, check=True)
+    subprocess.run(
+        [sys.executable, "auto_get_res_new.py"], cwd=mower_dir(), env=env, check=True
+    )
 
 
 def read_version_info() -> dict:
@@ -316,15 +362,31 @@ def ensure_release(tag: str, asset: Path, version_info: dict) -> None:
     notes_file = work_dir() / "release_notes.md"
     notes_file.parent.mkdir(parents=True, exist_ok=True)
     notes_file.write_text(build_release_notes(version_info), encoding="utf-8")
-    run(["gh", "release", "create", tag, str(asset),
-         "--target", "main", "--title", f"资源包 {tag}",
-         "--notes-file", str(notes_file)], check=True)
+    run(
+        [
+            "gh",
+            "release",
+            "create",
+            tag,
+            str(asset),
+            "--target",
+            "main",
+            "--title",
+            f"资源包 {tag}",
+            "--notes-file",
+            str(notes_file),
+        ],
+        check=True,
+    )
 
 
 def prune_releases() -> None:
     """删除旧 Release（保留最近 KEEP_RELEASES 个）。"""
-    out = run(["gh", "release", "list", "--limit", "100", "--json", "tagName"],
-              check=True, capture=True)
+    out = run(
+        ["gh", "release", "list", "--limit", "100", "--json", "tagName"],
+        check=True,
+        capture=True,
+    )
     tags = [r["tagName"] for r in json.loads(out)]
     for tag in tags[KEEP_RELEASES:]:
         run(["gh", "release", "delete", tag, "--yes", "--cleanup-tag"], check=True)
@@ -339,9 +401,16 @@ def commit_and_push(files: list, message: str) -> None:
         print("无文件变更，跳过提交")
         return
     subprocess.run(
-        [*git, "-c", "user.name=github-actions[bot]",
-         "-c", "user.email=github-actions[bot]@users.noreply.github.com",
-         "commit", "-m", message],
+        [
+            *git,
+            "-c",
+            "user.name=github-actions[bot]",
+            "-c",
+            "user.email=github-actions[bot]@users.noreply.github.com",
+            "commit",
+            "-m",
+            message,
+        ],
         check=True,
     )
     subprocess.run([*git, "push", "origin", "HEAD:main"], check=True)
@@ -374,6 +443,69 @@ def cmd_build() -> int:
     return 0
 
 
+def stage_overlay_bytes() -> bytes:
+    """从生成脚本产出的 stage_data_full.json 筛 ACTIVITY 子集（条目原样，endTs 嵌套原样保留）。"""
+    src = mower_dir() / "arknights_mower/data/stage_data_full.json"
+    if not src.exists():
+        raise RuntimeError(f"缺少生成产物 {src}，需先跑 build")
+    with open(src, encoding="utf-8") as f:
+        full = json.load(f)
+    overlay = [x for x in full if x.get("stageType") == "ACTIVITY"]
+    # 与生成脚本同款序列化（ensure_ascii=False + indent=2），保证字节稳定可幂等比较
+    return json.dumps(overlay, ensure_ascii=False, indent=2).encode("utf-8")
+
+
+def push_hotupdate_overlay() -> None:
+    """推活动关卡 overlay 到 MowerHotUpdate main；内容无变化则跳过（幂等）。"""
+    env = ssh_git_env("HOTUPDATE_SSH_KEY", "hotupdate_key")
+    content = stage_overlay_bytes()
+    repo = work_dir() / "mowerhotupdate"
+    shutil.rmtree(repo, ignore_errors=True)
+    git_run(
+        [
+            "git",
+            "clone",
+            "--depth",
+            "1",
+            HOTUPDATE_CLONE_URL,
+            str(repo),
+        ],
+        env=env,
+    )
+    target = repo / STAGE_OVERLAY_FILE
+    if target.exists() and target.read_bytes() == content:
+        print("热更活动关卡无变化，跳过推送")
+        return
+    target.write_bytes(content)
+    git = ["git", "-C", str(repo)]
+    git_run([*git, "add", STAGE_OVERLAY_FILE])
+    if subprocess.run([*git, "diff", "--cached", "--quiet"]).returncode == 0:
+        print("热更活动关卡无变化，跳过提交")
+        return
+    git_run(
+        [
+            *git,
+            "-c",
+            "user.name=github-actions[bot]",
+            "-c",
+            "user.email=github-actions[bot]@users.noreply.github.com",
+            "commit",
+            "-m",
+            "build(hotupdate): 更新活动关卡数据\n\n"
+            "活动开启/结束时活动关数据随之变化，随资源包生成推送到热更仓库，\n"
+            "客户端运行时读热更层按 id 覆盖基线活动关，免等整包更新。\n\n"
+            "Refs: #171",
+        ]
+    )
+    git_run([*git, "push", "origin", "HEAD:main"], env=env)
+    print(f"已推送活动关卡 overlay 到 {HOTUPDATE_REPO}")
+
+
+def cmd_hotupdate() -> int:
+    push_hotupdate_overlay()
+    return 0
+
+
 def main(argv: list) -> int:
     if not argv:
         print(__doc__)
@@ -383,6 +515,8 @@ def main(argv: list) -> int:
         return cmd_check()
     if sub == "build":
         return cmd_build()
+    if sub == "hotupdate":
+        return cmd_hotupdate()
     print(f"未知子命令: {sub}", file=sys.stderr)
     return 2
 
@@ -391,5 +525,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
     except Exception as e:  # 让 CI 步骤失败可见
-        print(f"资源包构建失败: {e}", file=sys.stderr)
+        print(f"管线执行失败: {e}", file=sys.stderr)
         sys.exit(1)

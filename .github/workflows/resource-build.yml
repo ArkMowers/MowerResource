@@ -4,6 +4,8 @@
 #       字体/脚本单独变不触发；workflow_dispatch 手动出包（绕过源变化检查）。
 # 发布：包内容无变化则跳过；有变化则打 zip 发 GitHub Release，version.json 提交到 main
 #       （main 一份 + zip 内一份，供网络/手动两通道读取）。
+# 附带：#197 生成后筛 stage_data_full 的 ACTIVITY 子集推 stage_data.json 到
+#       MowerHotUpdate main（HOTUPDATE_SSH_KEY deploy key，内容无变化跳过，幂等）。
 
 name: 生成并发布资源包
 
@@ -65,3 +67,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MOWERFONTS_SSH_KEY: ${{ secrets.MOWERFONTS_SSH_KEY }}
         run: python .github/scripts/resource_build.py build
+      - name: 推活动关卡 overlay 到热更仓库
+        env:
+          HOTUPDATE_SSH_KEY: ${{ secrets.HOTUPDATE_SSH_KEY }}
+        run: python .github/scripts/resource_build.py hotupdate
