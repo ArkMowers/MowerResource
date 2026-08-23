@@ -1,0 +1,67 @@
+# MowerResource 资源包生成/发布管线（#193 执行票）。
+# 目标仓库：ArkMowers/MowerResource（公开，MOWERFONTS_SSH_KEY 已配）。
+# 触发：每 1 小时调度检查一次；易变源（excel/item/avatar）default branch 有变即重打。
+#       字体/脚本单独变不触发；workflow_dispatch 手动出包（绕过源变化检查）。
+# 发布：包内容无变化则跳过；有变化则打 zip 发 GitHub Release，version.json 提交到 main
+#       （main 一份 + zip 内一份，供网络/手动两通道读取）。
+
+name: 生成并发布资源包
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: resource-build
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.gate.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 判断是否需要出包（易变源变化）
+        id: gate
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if python .github/scripts/resource_build.py check; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: gate
+    if: needs.gate.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      # MowerResource 检出（发布目标，仓库根）
+      - uses: actions/checkout@v4
+      # fork 检出：生成脚本 auto_get_res_new.py + arknights_mower 包 + requirements
+      - uses: actions/checkout@v4
+        with:
+          repository: NiceAfternoon/arknights-mower
+          ref: feat/stage-data-runtime-read
+          path: mower
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          # 只装生成脚本需要的 9 个依赖，不装应用全量 requirements（onnxruntime/ddddocr 等用不上）
+          python -m pip install "numpy<2" opencv-python pillow scikit-image colorlog requests pyyaml pydantic yamlcore
+      - name: 拉 5 源 + 生成 + 发布
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          MOWERFONTS_SSH_KEY: ${{ secrets.MOWERFONTS_SSH_KEY }}
+        run: python .github/scripts/resource_build.py build
