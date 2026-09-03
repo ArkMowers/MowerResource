@@ -47,11 +47,11 @@ jobs:
     steps:
       # MowerResource 检出（发布目标，仓库根）
       - uses: actions/checkout@v4
-      # fork 检出：生成脚本 auto_get_res_new.py + arknights_mower 包 + requirements
+      # 主仓库 alpha 检出：生成脚本 auto_get_res_new.py + arknights_mower 包 + requirements
       - uses: actions/checkout@v4
         with:
-          repository: NiceAfternoon/arknights-mower
-          ref: feat/stage-data-runtime-read
+          repository: ArkMowers/arknights-mower
+          ref: alpha
           path: mower
       - uses: actions/setup-python@v5
         with:

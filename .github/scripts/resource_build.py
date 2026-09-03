@@ -11,7 +11,7 @@
 
 运行环境（由 workflow 提供）:
   GITHUB_WORKSPACE       MowerResource 检出（仓库根 = 发布目标）
-  GITHUB_WORKSPACE/mower fork 检出（生成脚本 + arknights_mower 包）
+  GITHUB_WORKSPACE/mower 主仓库 alpha 检出（生成脚本 + arknights_mower 包）
   GITHUB_EVENT_NAME      schedule / workflow_dispatch
   GITHUB_TOKEN           脚本走 GitHub API
   GH_TOKEN               gh CLI（建 Release / 传资产 / 清旧）
