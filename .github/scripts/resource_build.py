@@ -36,7 +36,7 @@ STATE_FILE = "source_state.json"  # 管线内部状态（易变源 sha + 已发�
 
 # 易变源（游戏数据）；只有它们 default branch HEAD 变了才重打
 VOLATILE_SOURCES = [
-    "Kengxxiao/ArknightsGameData",  # gamedata/excel
+    "ArknightsAssets/ArknightsGamedata",  # gamedata/excel（cn）
     "yuanyan3060/ArknightsGameResource",  # item + avatar
 ]
 
@@ -225,15 +225,15 @@ def fetch_sources() -> Path:
     res_root = mower / "ArknightsGameResource"
     work = work_dir()
 
-    # 1. excel：Kengxxiao/ArknightsGameData 的 zh_CN/gamedata/excel
+    # 1. excel：ArknightsAssets/ArknightsGamedata 的 cn/gamedata/excel
     excel = work / "excel"
     sparse_clone(
-        "https://github.com/Kengxxiao/ArknightsGameData.git",
-        default_branch("Kengxxiao/ArknightsGameData"),
+        "https://github.com/ArknightsAssets/ArknightsGamedata.git",
+        default_branch("ArknightsAssets/ArknightsGamedata"),
         excel,
-        ["zh_CN/gamedata/excel"],
+        ["cn/gamedata/excel"],
     )
-    copy_tree(excel / "zh_CN/gamedata/excel", res_root / "gamedata/excel")
+    copy_tree(excel / "cn/gamedata/excel", res_root / "gamedata/excel")
 
     # 2+3. item + avatar：yuanyan3060/ArknightsGameResource
     res = work / "res"
