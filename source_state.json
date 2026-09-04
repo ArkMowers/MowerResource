@@ -1,7 +1,7 @@
 {
   "sources": {
-    "Kengxxiao/ArknightsGameData": "6844859c664c7b5716b3f6a9feaf2c3606168838",
-    "yuanyan3060/ArknightsGameResource": "975f7a9c970b148282a7ef4b7aa7d92e95b6acbb"
+    "ArknightsAssets/ArknightsGamedata": "53f69a6cbaa238bd824f8d82a59dcd3437de61e3",
+    "yuanyan3060/ArknightsGameResource": "bb48105cf738b41648c0a9dbb58bfbc6541e0a81"
   },
-  "content_hash": "c13018f"
+  "content_hash": "03f9d17"
 }
