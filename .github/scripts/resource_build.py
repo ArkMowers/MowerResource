@@ -37,7 +37,7 @@ STATE_FILE = "source_state.json"  # 管线内部状态（易变源 sha + 已发�
 # 易变源（游戏数据）；只有它们 default branch HEAD 变了才重打
 VOLATILE_SOURCES = [
     "ArknightsAssets/ArknightsGamedata",  # gamedata/excel（cn）
-    "yuanyan3060/ArknightsGameResource",  # item + avatar
+    "yuanyan3060/ArknightsGameResource",  # item + avatar + building_skill
 ]
 
 KEEP_RELEASES = 5  # 只保留最近 N 个 Release（客户端只要最新）
@@ -241,10 +241,11 @@ def fetch_sources() -> Path:
         "https://github.com/yuanyan3060/ArknightsGameResource.git",
         default_branch("yuanyan3060/ArknightsGameResource"),
         res,
-        ["item", "avatar"],
+        ["item", "avatar", "building_skill"],
     )
     copy_tree(res / "item", res_root / "item")
     copy_tree(res / "avatar", res_root / "avatar")
+    copy_tree(res / "building_skill", res_root / "building_skill")
     # avatar 上游只保留 char_*（剔 trap_/token_/npc_ 等非玩家干员）
     for f in (res_root / "avatar").glob("*"):
         if f.is_file() and not f.name.startswith("char_"):
