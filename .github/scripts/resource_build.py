@@ -278,6 +278,32 @@ def run_generation(fonts_dir: Path) -> None:
     )
 
 
+def validate_mastery_branches() -> None:
+    """发布前核对专精干员分支；不改产物，保持生成阶段的内容哈希有效。"""
+    root = mower_dir()
+    source = json.loads(
+        (root / "ArknightsGameResource/gamedata/excel/character_table.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    data = json.loads(
+        (root / "arknights_mower/data/skill_data.json").read_text(encoding="utf-8")
+    )
+    characters = data.get("characters")
+    if not isinstance(characters, dict) or not characters:
+        raise RuntimeError("专精资源缺少非空 characters，拒绝发布")
+    for char_id, character in characters.items():
+        expected = source.get(char_id, {}).get("subProfessionId")
+        actual = character.get("subProfessionId") if isinstance(character, dict) else None
+        if not isinstance(expected, str) or not expected.strip() or actual != expected:
+            raise RuntimeError(
+                f"专精干员 {char_id} 分支缺失或与源数据不一致："
+                f"subProfessionId={actual!r}，源值={expected!r}。"
+                "请检查主仓库 alpha 的 auto_get_res_new.py 是否保留 subProfessionId"
+            )
+    print(f"专精干员分支校验通过（{len(characters)} 名）")
+
+
 def read_version_info() -> dict:
     """读生成脚本产出的 version.json 全文。"""
     with open(mower_dir() / VERSION_JSON, encoding="utf-8") as f:
@@ -421,6 +447,7 @@ def commit_and_push(files: list, message: str) -> None:
 def cmd_build() -> int:
     fonts = fetch_sources()
     run_generation(fonts)
+    validate_mastery_branches()
     res_version, content_hash = read_res_version()
 
     state = load_state()
