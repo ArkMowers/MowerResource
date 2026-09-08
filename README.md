@@ -19,6 +19,21 @@ GitHub Actions 每小时检测上游游戏数据变化，有更新则生成资�
 
 `ArknightsAssets/ArknightsGamedata` 的 `cn/gamedata/excel` 随国服更新（最近提交 `Arknights update cn`），活动与卡池取自该 excel，避免旧源停更导致的「活动/卡池对不上」问题。
 
+## 专精干员分支
+
+资源包内 `arknights_mower/data/skill_data.json` 的 `characters[char_id]` 保留上游
+`character_table.json` 的 `subProfessionId`，例如桑葚为 `wandermedic`（行医）。
+`profession` 仍表示八大职业；分支字段为原始 ID，不翻译、不从技能描述推断。
+该表沿用现有专精数据筛选范围，不是全量干员目录。
+
+字段由主仓库 `alpha` 的 `auto_get_res_new.py` 在生成时写入，参与现有资源内容哈希，
+无需新增打包文件。发布前逐项核对分支与本次拉取的游戏数据是否一致；缺失或不一致时终止发布。
+新增字段兼容只读取旧字段的客户端。
+
+上线顺序：先合入主仓库生成脚本的字段提取，再合入本仓库校验；随后手动运行
+`workflow_dispatch` 生成资源包。仅修改生成脚本不会触发每小时的游戏源变化检查。
+本地校验测试：`python -m unittest discover -s .github/scripts/tests -p 'test_*.py'`。
+
 ## 版权与授权
 
 本仓库内容为游戏数据资源（webp/pkl/json），游戏素材 ©上海鹰角网络科技有限公司，仅用于学习与交流，侵删。
