@@ -26,7 +26,9 @@ class MasteryBranchTests(unittest.TestCase):
         self.source = {"char_473_mberry": {"subProfessionId": "wandermedic"}}
         self.characters = {
             "char_473_mberry": {
-                "name": "桑葚", "profession": "MEDIC", "subProfessionId": "wandermedic"
+                "name": "桑葚",
+                "profession": "MEDIC",
+                "subProfessionId": "wandermedic",
             }
         }
 
@@ -74,7 +76,11 @@ class MasteryBranchTests(unittest.TestCase):
             self.validate()
 
     def test_unknown_operator_or_missing_source_branch_is_rejected(self):
-        for source in ({}, {"char_473_mberry": {}}, {"char_473_mberry": {"subProfessionId": ""}}):
+        for source in (
+            {},
+            {"char_473_mberry": {}},
+            {"char_473_mberry": {"subProfessionId": ""}},
+        ):
             with self.subTest(source=source):
                 self.source = source
                 self.write_inputs()
@@ -141,6 +147,7 @@ class MasteryBranchTests(unittest.TestCase):
         del self.characters["char_473_mberry"]["subProfessionId"]
         self.write_inputs()
         with (
+            patch.object(builder, "repo_head", return_value="snapshot"),
             patch.object(builder, "fetch_sources"),
             patch.object(builder, "run_generation"),
             patch.object(builder, "read_res_version") as read_version,
