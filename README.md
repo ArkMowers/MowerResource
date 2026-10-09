@@ -41,9 +41,9 @@ GitHub Actions 每小时检测上游游戏数据变化，有更新则生成资�
 ### 字体子集自动扩充
 
 主仓生成器在绘制姓名和技能模板前检查字体实际字符映射，缺字时从
-主仓 `font_sources/NotoSansHans-Medium.otf` 和
-`font_sources/SourceHanSansCN-Medium.ttf` 自动扩充子集。显式配置且存在的
-`MOWERFONTS_DIR` 原字体优先于主仓原字体；源字体缺失、指纹不符
+MowerFonts 的 `fonts/NotoSansHans-Medium.otf` 和
+`fonts/SourceHanSansCN-Medium.ttf` 自动扩充子集。管线通过
+`MOWERFONTS_DIR` 传入字体检出目录；源字体缺失、指纹不符
 或源字体也缺字时，构建明确失败。完整字体只用于生成，不进入资源包。
 字体或脚本单独更新后，使用 `workflow_dispatch` 手动出包。
 
