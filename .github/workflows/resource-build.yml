@@ -56,14 +56,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: 校验资源发布测试
-        run: python -m unittest discover -s .github/scripts/tests -p 'test_*.py'
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
           # 安装图像生成和字体子集扩充依赖。
           python -m pip install "numpy<2" opencv-python pillow scikit-image colorlog requests pyyaml pydantic yamlcore "fonttools==4.66.1"
-      - name: 拉 5 源 + 生成 + 发布
+      - name: 校验资源发布测试
+        run: python -m unittest discover -s .github/scripts/tests -p 'test_*.py'
+      - name: 拉数据源 + 生成 + 发布
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}

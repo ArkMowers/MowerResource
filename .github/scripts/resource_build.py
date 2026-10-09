@@ -2,9 +2,9 @@
 """MowerResource 资源包生成管线（在 GitHub Actions 内运行）。
 
 子命令:
-  check  判断本次调度是否该出包：易变源 default branch HEAD 有变。
+  check  判断本次调度是否该出包：易变源实际使用的分支 HEAD 有变。
          需要出包 → exit 0；否则 exit 1。
-  build  拉 5 源 → 跑生成脚本(auto_get_res_new.py) → 包内容无变化则跳过发布；
+  build  拉数据源 → 跑生成脚本(auto_get_res_new.py) → 包内容无变化则跳过发布；
          有变化则打 zip、发 GitHub Release、提交 version.json + 状态到 main。
   hotupdate  生成后筛 stage_data_full 的 ACTIVITY 子集写成 stage_data.json，
          连同 key_mapping.json 推送到 MowerHotUpdate main（无变化跳过，幂等）。
@@ -31,15 +31,21 @@ import tempfile
 import time
 import urllib.request
 import zipfile
+from io import BytesIO
 from pathlib import Path
 
 STATE_FILE = "source_state.json"  # 管线内部状态（易变源 sha + 已发布内容哈希）
 
-# 易变源（游戏数据）；只有它们 default branch HEAD 变了才重打
-VOLATILE_SOURCES = [
-    "ArknightsAssets/ArknightsGamedata",  # gamedata/excel（cn）
-    "yuanyan3060/ArknightsGameResource",  # item + avatar + building_skill
-]
+# 易变源按实际使用的分支检查；None 使用默认分支。
+AVATAR_REPO = "ArknightsAssets/ArknightsAssets2"
+AVATAR_BRANCH = "cn"
+AVATAR_PATH = "assets/dyn/arts/charavatars"
+MAX_AVATAR_BYTES = 2 * 1024 * 1024
+VOLATILE_SOURCES = {
+    "ArknightsAssets/ArknightsGamedata": None,
+    "yuanyan3060/ArknightsGameResource": None,
+    AVATAR_REPO: AVATAR_BRANCH,
+}
 
 KEEP_RELEASES = 5  # 只保留最近 N 个 Release（客户端只要最新）
 RELEASE_ASSET = "resource.zip"  # 资产名稳定，客户端 releases/latest/download 拉
@@ -87,7 +93,9 @@ def work_dir() -> Path:
 
 
 def run(cmd, check=True, capture=False):
-    result = subprocess.run(cmd, capture_output=capture, text=True, check=False, timeout=300)
+    result = subprocess.run(
+        cmd, capture_output=capture, text=True, check=False, timeout=300
+    )
     if check and result.returncode != 0:
         raise RuntimeError(f"命令失败 {cmd}: {result.stdout} {result.stderr}")
     return result.stdout if capture else result
@@ -115,8 +123,8 @@ def default_branch(repo: str) -> str:
     return api_json(f"https://api.github.com/repos/{repo}")["default_branch"]
 
 
-def repo_head(repo: str) -> str:
-    branch = default_branch(repo)
+def repo_head(repo: str, branch: str | None = None) -> str:
+    branch = branch or default_branch(repo)
     return api_json(f"https://api.github.com/repos/{repo}/commits/{branch}")["sha"]
 
 
@@ -138,11 +146,11 @@ def cmd_check() -> int:
     if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
         print("手动 dispatch，强制出包")
         return 0
-    heads = {repo: repo_head(repo) for repo in VOLATILE_SOURCES}
+    heads = {repo: repo_head(repo, branch) for repo, branch in VOLATILE_SOURCES.items()}
     state = load_state()
     changed = any(state.get("sources", {}).get(r) != sha for r, sha in heads.items())
     if not changed:
-        print("易变源 default branch 无变化，跳过")
+        print("易变源分支无变化，跳过")
         return 1
     print("易变源有变化，出包")
     return 0
@@ -229,8 +237,8 @@ def fetch_fonts() -> Path:
     return fonts / "fonts"
 
 
-def fetch_sources() -> Path:
-    """拉 5 源进 fork 检出的期望路径，返回 MowerFonts 的 fonts 目录。"""
+def fetch_sources(source_heads: dict) -> Path:
+    """拉数据源进 fork 检出的期望路径，返回 MowerFonts 的 fonts 目录。"""
     mower = mower_dir()
     res_root = mower / "ArknightsGameResource"
     work = work_dir()
@@ -261,6 +269,8 @@ def fetch_sources() -> Path:
         if f.is_file() and not f.name.startswith("char_"):
             f.unlink()
 
+    fetch_missing_avatars(res_root, source_heads[AVATAR_REPO])
+
     # 4. composite_table：Arknights-yituliu/frontend-v2-plus dev
     composite_dest = mower / "frontend-v2-plus-dev/src/static/json/material"
     composite_dest.mkdir(parents=True, exist_ok=True)
@@ -278,6 +288,67 @@ def fetch_sources() -> Path:
 
     # 6. fonts：ArkMowers/MowerFonts（私有，deploy key）
     return fetch_fonts()
+
+
+def fetch_missing_avatars(res_root: Path, revision: str) -> None:
+    """仅从固定国服资产快照补齐可获取干员的缺失头像。"""
+    from PIL import Image
+
+    source = json.loads(
+        (res_root / "gamedata/excel/character_table.json").read_text(encoding="utf-8")
+    )
+    for char_id, character in source.items():
+        if not character.get("itemObtainApproach"):
+            continue
+        target = res_root / "avatar" / f"{char_id}.png"
+        if target.is_file():
+            continue
+        if not char_id.startswith("char_") or any(
+            c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+            for c in char_id
+        ):
+            raise ValueError(f"非法干员代码：{char_id}")
+        url = f"https://raw.githubusercontent.com/{AVATAR_REPO}/{revision}/{AVATAR_PATH}/{char_id}.png"
+        try:
+            with urllib.request.urlopen(url, timeout=30) as response:
+                data = response.read(MAX_AVATAR_BYTES + 1)
+            if len(data) > MAX_AVATAR_BYTES:
+                raise ValueError("头像超过体积限制")
+            with Image.open(BytesIO(data)) as image:
+                if image.format != "PNG" or not (
+                    0 < image.width <= 512 and 0 < image.height <= 512
+                ):
+                    raise ValueError("头像格式或尺寸无效")
+                image.load()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        except Exception as error:
+            raise RuntimeError(
+                f"无法补齐干员头像 {character['name']} ({char_id})，拒绝构建：{error}"
+            ) from error
+        print(f"已补齐头像 {character['name']} ({char_id}) @ {revision}")
+
+
+def validate_avatars() -> None:
+    """发布前验证干员目录中每个头像均为可解码的 96×96 WEBP。"""
+    from PIL import Image
+
+    root = mower_dir()
+    names = json.loads(
+        (root / "arknights_mower/data/agent.json").read_text(encoding="utf-8")
+    )
+    if not isinstance(names, list) or not names:
+        raise RuntimeError("干员目录为空，拒绝发布")
+    for name in names:
+        try:
+            with Image.open(root / "ui/public/avatar" / f"{name}.webp") as image:
+                if image.format != "WEBP" or image.size != (96, 96):
+                    raise ValueError("头像格式或尺寸无效")
+                image.load()
+        except Exception as error:
+            raise RuntimeError(
+                f"干员头像 {name} 缺失或损坏，拒绝发布：{error}"
+            ) from error
 
 
 def run_generation(fonts_dir: Path) -> None:
@@ -322,7 +393,9 @@ def validate_mastery_branches() -> None:
         raise RuntimeError("专精资源缺少非空 characters，拒绝发布")
     for char_id, character in characters.items():
         expected = source.get(char_id, {}).get("subProfessionId")
-        actual = character.get("subProfessionId") if isinstance(character, dict) else None
+        actual = (
+            character.get("subProfessionId") if isinstance(character, dict) else None
+        )
         if not isinstance(expected, str) or not expected.strip() or actual != expected:
             raise RuntimeError(
                 f"专精干员 {char_id} 分支缺失或与源数据不一致："
@@ -580,13 +653,17 @@ def commit_and_push(files: list, message: str) -> None:
 
 
 def cmd_build() -> int:
-    fonts = fetch_sources()
+    source_heads = {
+        repo: repo_head(repo, branch) for repo, branch in VOLATILE_SOURCES.items()
+    }
+    fonts = fetch_sources(source_heads)
     run_generation(fonts)
     validate_mastery_branches()
+    validate_avatars()
     res_version, content_hash = read_res_version()
 
     state = load_state()
-    state["sources"] = {repo: repo_head(repo) for repo in VOLATILE_SOURCES}
+    state["sources"] = source_heads
     if content_hash and content_hash == state.get("content_hash"):
         print("包内容无变化，跳过发布")
         save_state(state)

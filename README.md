@@ -12,6 +12,7 @@ GitHub Actions 每小时检测上游游戏数据变化，有更新则生成资�
 | --- | --- | --- |
 | 游戏数据 excel（活动/卡池/物品/关卡/技能/基建…） | [ArknightsAssets/ArknightsGamedata](https://github.com/ArknightsAssets/ArknightsGamedata) | `cn/gamedata/excel` |
 | 物品与干员头像图片 | [yuanyan3060/ArknightsGameResource](https://github.com/yuanyan3060/ArknightsGameResource) | `item`、`avatar` |
+| 缺失干员头像补充 | [ArknightsAssets/ArknightsAssets2](https://github.com/ArknightsAssets/ArknightsAssets2) | `cn` 分支 `assets/dyn/arts/charavatars` |
 | 加工站/专精合成配方 | [Arknights-yituliu/frontend-v2-plus](https://github.com/Arknights-yituliu/frontend-v2-plus) | `dev` 分支 `src/static/json/material/composite_table.v2.json` |
 | 数据快照时间戳（`version.json` 的 `last_updated`） | [yuanyan3060/ArknightsGameResource](https://github.com/yuanyan3060/ArknightsGameResource) | 仓库根 `version` |
 | 识别用字体 | [ArkMowers/MowerFonts](https://github.com/ArkMowers/MowerFonts) | 私有仓库，部署密钥只读取 |
@@ -62,3 +63,5 @@ MowerFonts 的 `fonts/NotoSansHans-Medium.otf` 和
 资源编解码协议随主仓 `arknights_mower/utils/resource_ota.py` 维护。
 发布端单元测试在主仓检出可用时使用同一模块；本地用
 `MOWER_OTA_TEST_ROOT` 指向该检出。主仓尚无模块时，发布流程只提供整包及其摘要索引。
+
+干员头像优先沿用原图片源；缺失时按本次检测到的国服资产提交补齐，并校验 PNG 格式、尺寸与体积。每小时检测包含资产库的 `cn` 分支。发布前核对 `agent.json` 中每个干员的 96×96 WEBP 头像，缺失或损坏时停止发布。
