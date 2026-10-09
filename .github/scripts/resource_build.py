@@ -20,6 +20,7 @@
 """
 
 import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -42,6 +43,8 @@ VOLATILE_SOURCES = [
 
 KEEP_RELEASES = 5  # 只保留最近 N 个 Release（客户端只要最新）
 RELEASE_ASSET = "resource.zip"  # 资产名稳定，客户端 releases/latest/download 拉
+UPDATE_INDEX_ASSET = "resource-update.json"
+MAX_OTA_BASES = KEEP_RELEASES - 1
 VERSION_JSON = "arknights_mower/data/version.json"  # 生成脚本产出的版本元数据
 HOTUPDATE_REPO = "ArkMowers/MowerHotUpdate"  # 热更仓库（只推文件、不建 Release）
 HOTUPDATE_CLONE_URL = f"git@github.com:{HOTUPDATE_REPO}.git"
@@ -84,7 +87,7 @@ def work_dir() -> Path:
 
 
 def run(cmd, check=True, capture=False):
-    result = subprocess.run(cmd, capture_output=capture, text=True)
+    result = subprocess.run(cmd, capture_output=capture, text=True, check=False, timeout=300)
     if check and result.returncode != 0:
         raise RuntimeError(f"命令失败 {cmd}: {result.stdout} {result.stderr}")
     return result.stdout if capture else result
@@ -410,7 +413,109 @@ def build_zip(out_zip: Path) -> None:
                 zf.writestr(zi, fh.read())
 
 
-def ensure_release(tag: str, asset: Path, version_info: dict) -> None:
+def build_update_assets(tag: str, full_zip: Path) -> list[Path]:
+    """生成保留版本直达 OTA 与索引；旧主仓仍能发布带摘要的整包。"""
+
+    def descriptor(path):
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+        return {
+            "name": path.name,
+            "size": path.stat().st_size,
+            "sha256": digest.hexdigest(),
+        }
+
+    full = descriptor(full_zip)
+    index = {"format": 1, "version": tag, "full": full, "ota": []}
+    assets = []
+    source = mower_dir() / "arknights_mower/utils/resource_ota.py"
+    if source.is_file():
+        spec = importlib.util.spec_from_file_location("resource_ota_codec", source)
+        codec = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(codec)
+        version_module = load_res_version()
+        try:
+            result = subprocess.run(
+                [
+                    "gh",
+                    "release",
+                    "list",
+                    "--limit",
+                    str(KEEP_RELEASES + 1),
+                    "--json",
+                    "tagName,isDraft,isPrerelease",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            releases = json.loads(result.stdout)
+            if not isinstance(releases, list) or any(
+                not isinstance(release, dict) for release in releases
+            ):
+                raise ValueError("历史资源发布列表无效")
+            candidates = [
+                release["tagName"]
+                for release in releases
+                if not release.get("isDraft")
+                and not release.get("isPrerelease")
+                and release.get("tagName") != tag
+                and version_module.parse_version(release.get("tagName")) is not None
+            ][:MAX_OTA_BASES]
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            print(f"历史资源发布列表不可用，本次只发布整包索引：{error}")
+            candidates = []
+        for previous in candidates:
+            try:
+                with tempfile.TemporaryDirectory(dir=work_dir()) as directory:
+                    subprocess.run(
+                        [
+                            "gh",
+                            "release",
+                            "download",
+                            previous,
+                            "--pattern",
+                            RELEASE_ASSET,
+                            "--dir",
+                            directory,
+                        ],
+                        check=True,
+                        timeout=300,
+                    )
+                    previous_zip = Path(directory) / RELEASE_ASSET
+                    if previous_zip.stat().st_size > codec.MAX_BYTES:
+                        raise ValueError("旧资源包超过体积限制")
+                    output = full_zip.parent / f"resource-ota_{previous}_to_{tag}.zip"
+                    manifest = codec.build_ota(
+                        previous_zip, full_zip, output, version_module.is_package_file
+                    )
+                    if manifest["from"] != previous or manifest["to"] != tag:
+                        raise ValueError("资源包版本与发布标签不一致")
+                    if output.stat().st_size >= full["size"] * 0.85:
+                        output.unlink()
+                        continue
+                    index["ota"].append({"from": previous, **descriptor(output)})
+                    assets.append(output)
+            except (
+                OSError,
+                ValueError,
+                subprocess.SubprocessError,
+                zipfile.BadZipFile,
+            ) as error:
+                print(f"跳过 {previous} 的资源 OTA，保留整包：{error}")
+    else:
+        print("主仓生成器尚未支持资源 OTA，本次只发布整包索引")
+    index_path = full_zip.parent / UPDATE_INDEX_ASSET
+    index_path.write_text(
+        json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return [*assets, index_path]
+
+
+def ensure_release(tag: str, asset: Path, version_info: dict, extra_assets=()) -> None:
     """创建/覆盖对应 tag 的 Release 并上传资源包 zip（带说明）。"""
     run(["gh", "release", "delete", tag, "--yes", "--cleanup-tag"], check=False)
     notes_file = work_dir() / "release_notes.md"
@@ -423,6 +528,8 @@ def ensure_release(tag: str, asset: Path, version_info: dict) -> None:
             "create",
             tag,
             str(asset),
+            *(str(path) for path in extra_assets),
+            "--draft",
             "--target",
             "main",
             "--title",
@@ -432,6 +539,8 @@ def ensure_release(tag: str, asset: Path, version_info: dict) -> None:
         ],
         check=True,
     )
+    # Expose metadata only after every full and incremental asset is uploaded.
+    run(["gh", "release", "edit", tag, "--draft=false", "--latest"], check=True)
 
 
 def prune_releases() -> None:
@@ -487,7 +596,8 @@ def cmd_build() -> int:
     out_zip = work_dir() / RELEASE_ASSET
     out_zip.parent.mkdir(parents=True, exist_ok=True)
     build_zip(out_zip)
-    ensure_release(res_version, out_zip, read_version_info())
+    update_assets = build_update_assets(res_version, out_zip)
+    ensure_release(res_version, out_zip, read_version_info(), update_assets)
     prune_releases()
 
     copy_file(mower_dir() / VERSION_JSON, workspace() / "version.json")
