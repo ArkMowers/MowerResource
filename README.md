@@ -37,3 +37,11 @@ GitHub Actions 每小时检测上游游戏数据变化，有更新则生成资�
 ## 版权与授权
 
 本仓库内容为游戏数据资源（webp/pkl/json），游戏素材 ©上海鹰角网络科技有限公司，仅用于学习与交流，侵删。
+
+### 字体子集自动扩充
+
+主仓生成器在绘制姓名和技能模板前检查字体实际字符映射，缺字时从
+MowerFonts 的 `fonts/NotoSansHans-Medium.otf` 和
+`fonts/SourceHanSansCN-Medium.ttf` 自动扩充子集。源字体缺失、指纹不符
+或源字体也缺字时，构建明确失败。完整字体只用于生成，不进入资源包。
+字体或脚本单独更新后，使用 `workflow_dispatch` 手动出包。
