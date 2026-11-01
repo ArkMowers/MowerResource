@@ -24,6 +24,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -41,8 +42,11 @@ AVATAR_REPO = "ArknightsAssets/ArknightsAssets2"
 AVATAR_BRANCH = "cn"
 AVATAR_PATH = "assets/dyn/arts/charavatars"
 MAX_AVATAR_BYTES = 2 * 1024 * 1024
+GAME_DATA_REPO = "Kengxxiao/ArknightsGameData"
+GAME_DATA_PATH = "zh_CN/gamedata/excel"
+SKILL_ICON_PATH = "assets/dyn/arts/building/skills"
 VOLATILE_SOURCES = {
-    "ArknightsAssets/ArknightsGamedata": None,
+    GAME_DATA_REPO: None,
     "yuanyan3060/ArknightsGameResource": None,
     AVATAR_REPO: AVATAR_BRANCH,
 }
@@ -79,12 +83,18 @@ def load_package_spec():
     """打包文件集：必须与生成器算内容哈希用的 package_file_paths 对齐。
 
     生成器按 res_version.package_file_paths 计算内容哈希，文件存在时含
-    RES_PACKAGE_OPTIONAL_MODELS；打包漏掉它们会让 zip 自身「声明哈希 ≠ 包内容」，
-    也会让装了外部包的用户拿不到这些模型。老版本 res_version 没有该常量时按空处理。
+    RES_PACKAGE_OPTIONAL_MODELS 和 RES_PACKAGE_OPTIONAL_DATA；漏装会导致声明摘要
+    与包内容不符，也会使用户拿不到对应模型或活动商店数据。旧生成器未声明的可选
+    文件集按空处理。
     """
     mod = load_res_version()
     optional = getattr(mod, "RES_PACKAGE_OPTIONAL_MODELS", ())
-    return mod.RES_PACKAGE_DIRS, mod.RES_PACKAGE_MODELS + optional, mod.RES_PACKAGE_DATA
+    optional_data = getattr(mod, "RES_PACKAGE_OPTIONAL_DATA", ())
+    return (
+        mod.RES_PACKAGE_DIRS,
+        mod.RES_PACKAGE_MODELS + optional,
+        mod.RES_PACKAGE_DATA + optional_data,
+    )
 
 
 def work_dir() -> Path:
@@ -156,7 +166,9 @@ def cmd_check() -> int:
     return 0
 
 
-def sparse_clone(url: str, branch: str, dest: Path, subdirs: list) -> None:
+def sparse_clone(
+    url: str, branch: str, dest: Path, subdirs: list, revision: str | None = None
+) -> None:
     """稀疏克隆单个目录子树，避免整仓下载。"""
     shutil.rmtree(dest, ignore_errors=True)
     subprocess.run(
@@ -174,6 +186,14 @@ def sparse_clone(url: str, branch: str, dest: Path, subdirs: list) -> None:
         ],
         check=True,
     )
+    if revision is not None:
+        subprocess.run(
+            ["git", "-C", str(dest), "fetch", "--depth", "1", "origin", revision],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(dest), "checkout", "--detach", revision], check=True
+        )
     subprocess.run(
         ["git", "-C", str(dest), "sparse-checkout", "set", *subdirs],
         check=True,
@@ -243,15 +263,16 @@ def fetch_sources(source_heads: dict) -> Path:
     res_root = mower / "ArknightsGameResource"
     work = work_dir()
 
-    # 1. excel：ArknightsAssets/ArknightsGamedata 的 cn/gamedata/excel
+    # 1. excel：同一次国服游戏表快照，包括活动、干员与技能。
     excel = work / "excel"
     sparse_clone(
-        "https://github.com/ArknightsAssets/ArknightsGamedata.git",
-        default_branch("ArknightsAssets/ArknightsGamedata"),
+        f"https://github.com/{GAME_DATA_REPO}.git",
+        default_branch(GAME_DATA_REPO),
         excel,
-        ["cn/gamedata/excel"],
+        [GAME_DATA_PATH],
+        revision=source_heads[GAME_DATA_REPO],
     )
-    copy_tree(excel / "cn/gamedata/excel", res_root / "gamedata/excel")
+    copy_tree(excel / GAME_DATA_PATH, res_root / "gamedata/excel")
 
     # 2+3. item + avatar：yuanyan3060/ArknightsGameResource
     res = work / "res"
@@ -260,6 +281,7 @@ def fetch_sources(source_heads: dict) -> Path:
         default_branch("yuanyan3060/ArknightsGameResource"),
         res,
         ["item", "avatar", "building_skill"],
+        revision=source_heads["yuanyan3060/ArknightsGameResource"],
     )
     copy_tree(res / "item", res_root / "item")
     copy_tree(res / "avatar", res_root / "avatar")
@@ -270,6 +292,7 @@ def fetch_sources(source_heads: dict) -> Path:
             f.unlink()
 
     fetch_missing_avatars(res_root, source_heads[AVATAR_REPO])
+    fetch_missing_skill_icons(res_root, source_heads[AVATAR_REPO])
 
     # 4. composite_table：Arknights-yituliu/frontend-v2-plus dev
     composite_dest = mower / "frontend-v2-plus-dev/src/static/json/material"
@@ -281,10 +304,7 @@ def fetch_sources(source_heads: dict) -> Path:
     )
 
     # 5. 上游 version 文件（yuanyan3060 仓库根时间戳）→ last_updated 用
-    urllib.request.urlretrieve(
-        "https://raw.githubusercontent.com/yuanyan3060/ArknightsGameResource/main/version",
-        res_root / "version",
-    )
+    copy_file(res / "version", res_root / "version")
 
     # 6. fonts：ArkMowers/MowerFonts（私有，deploy key）
     return fetch_fonts()
@@ -327,6 +347,74 @@ def fetch_missing_avatars(res_root: Path, revision: str) -> None:
                 f"无法补齐干员头像 {character['name']} ({char_id})，拒绝构建：{error}"
             ) from error
         print(f"已补齐头像 {character['name']} ({char_id}) @ {revision}")
+
+
+def required_skill_icons(res_root: Path) -> set[str]:
+    characters = json.loads(
+        (res_root / "gamedata/excel/character_table.json").read_text("utf-8")
+    )
+    building = json.loads(
+        (res_root / "gamedata/excel/building_data.json").read_text("utf-8")
+    )
+    return {
+        building["buffs"][ref["buffId"]]["skillIcon"]
+        for cid, character in characters.items()
+        if character.get("itemObtainApproach")
+        for slot in building.get("chars", {}).get(cid, {}).get("buffChar", [])
+        for ref in slot["buffData"]
+    }
+
+
+def fetch_missing_skill_icons(res_root: Path, revision: str) -> None:
+    """从与头像相同的固定资产提交补齐实际干员引用的技能图标。"""
+    from urllib.parse import quote
+
+    from PIL import Image
+
+    for icon in sorted(required_skill_icons(res_root)):
+        if not re.fullmatch(r"[A-Za-z0-9_&-]+", icon):
+            raise ValueError(f"非法基建技能图标：{icon}")
+        target = res_root / "building_skill" / f"{icon}.png"
+        if target.is_file():
+            continue
+        url = (
+            f"https://raw.githubusercontent.com/{AVATAR_REPO}/{revision}/"
+            f"{SKILL_ICON_PATH}/{quote(icon, safe='')}.png"
+        )
+        try:
+            with urllib.request.urlopen(url, timeout=30) as response:
+                data = response.read(MAX_AVATAR_BYTES + 1)
+            if len(data) > MAX_AVATAR_BYTES:
+                raise ValueError("技能图标超过体积限制")
+            with Image.open(BytesIO(data)) as image:
+                if image.format != "PNG" or not (
+                    0 < image.width <= 512 and 0 < image.height <= 512
+                ):
+                    raise ValueError("技能图标格式或尺寸无效")
+                image.load()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        except Exception as error:
+            raise RuntimeError(
+                f"无法补齐基建技能图标 {icon}，拒绝构建：{error}"
+            ) from error
+
+
+def validate_skill_icons() -> None:
+    from PIL import Image
+
+    for icon in sorted(required_skill_icons(mower_dir() / "ArknightsGameResource")):
+        try:
+            with Image.open(
+                mower_dir() / "ui/public/building_skill" / f"{icon}.webp"
+            ) as image:
+                image.load()
+                if image.format != "WEBP" or image.width <= 0 or image.height <= 0:
+                    raise ValueError("技能图标格式或尺寸无效")
+        except Exception as error:
+            raise RuntimeError(
+                f"基建技能图标 {icon} 缺失或损坏，拒绝发布：{error}"
+            ) from error
 
 
 def validate_avatars() -> None:
@@ -660,6 +748,7 @@ def cmd_build() -> int:
     run_generation(fonts)
     validate_mastery_branches()
     validate_avatars()
+    validate_skill_icons()
     res_version, content_hash = read_res_version()
 
     state = load_state()
