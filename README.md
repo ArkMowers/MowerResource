@@ -10,15 +10,17 @@ GitHub Actions 每小时检测上游游戏数据变化，有更新则生成资�
 
 | 用途 | 上游仓库 | 分支 / 路径 |
 | --- | --- | --- |
-| 游戏数据 excel（活动/卡池/物品/关卡/技能/基建…） | [ArknightsAssets/ArknightsGamedata](https://github.com/ArknightsAssets/ArknightsGamedata) | `cn/gamedata/excel` |
-| 物品与干员头像图片 | [yuanyan3060/ArknightsGameResource](https://github.com/yuanyan3060/ArknightsGameResource) | `item`、`avatar` |
-| 缺失干员头像补充 | [ArknightsAssets/ArknightsAssets2](https://github.com/ArknightsAssets/ArknightsAssets2) | `cn` 分支 `assets/dyn/arts/charavatars` |
+| 游戏数据 excel（活动/卡池/物品/关卡/技能/基建…） | [Kengxxiao/ArknightsGameData](https://github.com/Kengxxiao/ArknightsGameData) | `zh_CN/gamedata/excel` |
+| 物品、干员头像与基建图标图片 | [yuanyan3060/ArknightsGameResource](https://github.com/yuanyan3060/ArknightsGameResource) | `item`、`avatar`、`building_skill` |
+| 缺失干员头像与基建图标补充 | [ArknightsAssets/ArknightsAssets2](https://github.com/ArknightsAssets/ArknightsAssets2) | `cn` 分支 `assets/dyn/arts/charavatars`、`assets/dyn/arts/building/skills` |
 | 加工站/专精合成配方 | [Arknights-yituliu/frontend-v2-plus](https://github.com/Arknights-yituliu/frontend-v2-plus) | `dev` 分支 `src/static/json/material/composite_table.v2.json` |
 | 数据快照时间戳（`version.json` 的 `last_updated`） | [yuanyan3060/ArknightsGameResource](https://github.com/yuanyan3060/ArknightsGameResource) | 仓库根 `version` |
 | 识别用字体 | [ArkMowers/MowerFonts](https://github.com/ArkMowers/MowerFonts) | 私有仓库，部署密钥只读取 |
 | 生成脚本与 `arknights_mower` 依赖 | [ArkMowers/arknights-mower](https://github.com/ArkMowers/arknights-mower) | `alpha` 分支 |
 
-`ArknightsAssets/ArknightsGamedata` 的 `cn/gamedata/excel` 随国服更新（最近提交 `Arknights update cn`），活动与卡池取自该 excel，避免旧源停更导致的「活动/卡池对不上」问题。
+游戏表统一取自 ArknightsGameData 的国服目录，活动、关卡、干员和技能使用同次检出的输入。主仓库生成器从已核对的客户端布局和活动表生成活动商店入口、确认标题及领取窗口，`event_shop.json` 随既有可选资源打包；缺少已适配活动时生成失败，不能发布空表代替适配。
+
+游戏表和原图片源按检查时观察到的提交检出，版本时间戳也从同一图片检出读取。打包同时收集主仓声明的可选模型和可选数据；旧生成器未声明的可选集合保持为空。
 
 ## 专精干员分支
 
@@ -65,3 +67,5 @@ MowerFonts 的 `fonts/NotoSansHans-Medium.otf` 和
 `MOWER_OTA_TEST_ROOT` 指向该检出。主仓尚无模块时，发布流程只提供整包及其摘要索引。
 
 干员头像优先沿用原图片源；缺失时按本次检测到的国服资产提交补齐，并校验 PNG 格式、尺寸与体积。每小时检测包含资产库的 `cn` 分支。发布前核对 `agent.json` 中每个干员的 96×96 WEBP 头像，缺失或损坏时停止发布。
+
+实际干员引用的基建技能图标也从同一资产提交补齐，包含尚未解锁阶段的图标；不抓取无关或不可获取角色的资源。发布前逐项解码生成的 WEBP，缺失或损坏时停止发布。已存在的图片源和用户端资源加载规则保持原有处理。
